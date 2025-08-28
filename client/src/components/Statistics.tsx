@@ -1,1328 +1,817 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { Activity, Building2, CheckCircle2, Timer, Users, TrendingUp, Calendar, ArrowLeft, FileText, DollarSign, Award, Trophy, Star, Clock, MapPin } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  ArrowLeft, 
+  BarChart2, 
+  DollarSign, 
+  Calendar, 
+  TrendingUp, 
+  Building2,
+  Download,
+  Users,
+  Clock,
+  Activity,
+  PieChart,
+  LineChart,
+  Filter,
+  RefreshCw
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useData } from '../contexts/DataContext';
-import { Chart as ChartJS, ArcElement, Tooltip, Legend, Title, CategoryScale, LinearScale, BarElement, LineElement, PointElement } from 'chart.js';
-import LocationAnalytics from './LocationAnalytics';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, ArcElement, LineElement, PointElement } from 'chart.js';
+import { Bar, Pie, Line } from 'react-chartjs-2';
+import { saveAs } from 'file-saver';
 
-// Only load Chart.js on client-side as needed
-let Pie: any = () => <div className="h-64 flex items-center justify-center text-gray-500">Loading chart...</div>;
-let Bar: any = () => <div className="h-64 flex items-center justify-center text-gray-500">Loading chart...</div>;
+// Register Chart.js components
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  Title,
+  Tooltip,
+  Legend
+);
 
-// Dynamically import Chart.js components to prevent mobile issues
-if (typeof window !== 'undefined') {
-  import('react-chartjs-2').then(module => {
-    Pie = module.Pie;
-    Bar = module.Bar;
-  }).catch(err => {
-    console.error("Could not load Chart.js components:", err);
-  });
-  
-  // Register required components only if in browser
-  try {
-    ChartJS.register(ArcElement, Tooltip, Legend, Title, CategoryScale, LinearScale, BarElement, LineElement, PointElement);
-  } catch (err) {
-    console.warn("Could not register Chart.js components:", err);
-  }
+interface CompanyEarnings {
+  companyId: string;
+  companyName: string;
+  totalEarnings: number;
+  dailyBreakdown: { [date: string]: number };
+  weeklyBreakdown: { [week: string]: number };
+  monthlyBreakdown: { [month: string]: number };
+  projectCount: number;
 }
 
-// Define colors for pie chart
-const chartColors = [
-  '#4ade80', // green-400
-  '#60a5fa', // blue-400
-  '#f97316', // orange-500
-  '#8b5cf6', // violet-500
-  '#ec4899', // pink-500
-  '#14b8a6', // teal-500
-  '#f59e0b', // amber-500
-  '#6366f1', // indigo-500
-  '#ef4444', // red-500
-  '#10b981', // emerald-500
-  '#3b82f6', // blue-500
-  '#a855f7', // purple-500
-];
+interface TimePeriodsData {
+  daily: { [date: string]: number };
+  weekly: { [week: string]: number };
+  monthly: { [month: string]: number };
+}
 
 export default function Statistics() {
   const navigate = useNavigate();
-  const { projects, companies, drivers } = useData();
-  const [statistics, setStatistics] = useState({
-    total: 0,
-    active: 0,
-    completed: 0,
-    totalRevenue: 0,
-    totalPassengers: 0,
-    todayPassengers: 0,
-    weeklyPassengers: 0,
-    monthlyPassengers: 0
-  });
-  const [companyStats, setCompanyStats] = useState<{ [key: string]: number }>({});
-  const [topDrivers, setTopDrivers] = useState<Array<{ id: string; total: number }>>([]);
-  const [monthlyStats, setMonthlyStats] = useState<{ [key: string]: number }>({});
-  const [dailyEarnings, setDailyEarnings] = useState<{ [key: string]: number }>({});
-  const [allTimeBestDay, setAllTimeBestDay] = useState<{ date: string; earnings: number; dayName: string } | null>(null);
-  const [pieChartData, setPieChartData] = useState<any>(null);
-  const [chartError, setChartError] = useState<boolean>(false);
-  const [hourlyData, setHourlyData] = useState<any>(null);
-  const [weeklyData, setWeeklyData] = useState<any>(null);
-  const [growthTrends, setGrowthTrends] = useState<any>(null);
-  const [demandPrediction, setDemandPrediction] = useState<any>(null);
+  const { projects, companies, drivers, carTypes, loading, refreshData } = useData();
+  const [selectedCompany, setSelectedCompany] = useState<string>('');
+  const [timePeriod, setTimePeriod] = useState<'daily' | 'weekly' | 'monthly'>('monthly');
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const getCompanyName = (id: string) => {
-    const company = companies.find(c => c.id === id);
-    return company?.name || 'Unknown Company';
-  };
+  // Get available years from project data
+  const availableYears = useMemo(() => {
+    const years = [...new Set(projects.map(p => new Date(p.date).getFullYear()))];
+    return years.sort((a, b) => b - a);
+  }, [projects]);
 
-  const getDriverName = (id: string) => {
-    const driver = drivers.find(d => d.id === id);
-    return driver?.name || 'Unknown Driver';
-  };
+  // Calculate company earnings data
+  const companyEarningsData = useMemo(() => {
+    const earningsMap = new Map<string, CompanyEarnings>();
 
-  // Calculate statistics
-  useEffect(() => {
-    try {
-      // Calculate passenger statistics
-      const now = new Date();
-      const today = now.toDateString();
-      
-      // Start of current week (Monday)
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - now.getDay() + 1);
-      startOfWeek.setHours(0, 0, 0, 0);
-      
-      // Start of current month
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      
-      const totalPassengers = projects.reduce((sum, p) => sum + (p.passengers || 0), 0);
-      
-      const todayPassengers = projects
-        .filter(p => new Date(p.date).toDateString() === today)
-        .reduce((sum, p) => sum + (p.passengers || 0), 0);
-      
-      const weeklyPassengers = projects
-        .filter(p => new Date(p.date) >= startOfWeek)
-        .reduce((sum, p) => sum + (p.passengers || 0), 0);
-      
-      const monthlyPassengers = projects
-        .filter(p => new Date(p.date) >= startOfMonth)
-        .reduce((sum, p) => sum + (p.passengers || 0), 0);
-
-      // Project statistics
-      const stats = {
-        total: projects.length,
-        active: projects.filter(p => p.status === 'active').length,
-        completed: projects.filter(p => p.status === 'completed').length,
-        totalRevenue: projects.reduce((sum, p) => sum + p.price, 0),
-        totalPassengers,
-        todayPassengers,
-        weeklyPassengers,
-        monthlyPassengers
-      };
-      setStatistics(stats);
-
-      // Company distribution
-      const companyDist = projects.reduce((acc, project) => {
-        acc[project.company] = (acc[project.company] || 0) + 1;
-        return acc;
-      }, {} as { [key: string]: number });
-      setCompanyStats(companyDist);
-
-      // Monthly revenue
-      const monthly = projects.reduce((acc, project) => {
-        const month = new Date(project.date).toLocaleString('default', { month: 'long' });
-        acc[month] = (acc[month] || 0) + project.price;
-        return acc;
-      }, {} as { [key: string]: number });
-      setMonthlyStats(monthly);
-
-      // Daily earnings - last 30 days
-      const daily = projects.reduce((acc, project) => {
-        const dateKey = project.date; // YYYY-MM-DD format
-        acc[dateKey] = (acc[dateKey] || 0) + project.price;
-        return acc;
-      }, {} as { [key: string]: number });
-      
-      // Sort daily earnings by date and keep only last 30 days
-      const sortedDates = Object.keys(daily).sort().reverse().slice(0, 30);
-      const recentDailyEarnings = sortedDates.reduce((acc, date) => {
-        acc[date] = daily[date];
-        return acc;
-      }, {} as { [key: string]: number });
-      
-      setDailyEarnings(recentDailyEarnings);
-
-      // Calculate all-time best earning day
-      let bestDate = '';
-      let bestEarnings = 0;
-      for (const [date, earnings] of Object.entries(daily)) {
-        if (earnings > bestEarnings) {
-          bestEarnings = earnings;
-          bestDate = date;
-        }
-      }
-      
-      if (bestDate && bestEarnings > 0) {
-        const dayName = new Date(bestDate).toLocaleDateString('en-US', { weekday: 'long' });
-        setAllTimeBestDay({
-          date: bestDate,
-          earnings: bestEarnings,
-          dayName
-        });
-      } else {
-        setAllTimeBestDay(null);
-      }
-
-      // Top drivers by earnings
-      const driverEarnings = drivers
-        .map(driver => ({
-          id: driver.id,
-          total: driver.total_earnings || 0
-        }))
-        .sort((a, b) => b.total - a.total)
-        .slice(0, 5);
-      setTopDrivers(driverEarnings);
-
-      // Create pie chart data
-      if (Object.keys(companyDist).length > 0) {
-        // Calculate total projects for percentage calculation
-        const totalProjects = Object.values(companyDist).reduce((sum, count) => sum + count, 0);
-        
-        // Prepare data for pie chart
-        const companyNames = Object.keys(companyDist).map(id => getCompanyName(id));
-        const companyCounts = Object.values(companyDist);
-        
-        setPieChartData({
-          labels: companyNames,
-          datasets: [{
-            data: companyCounts,
-            backgroundColor: chartColors.slice(0, companyCounts.length),
-            borderColor: chartColors.map(color => color + '80'), // 50% opacity
-            borderWidth: 1,
-          }],
-        });
-      }
-
-      // Calculate hourly project creation patterns
-      const hourlyStats = new Array(24).fill(0);
-      projects.forEach(project => {
-        const hour = parseInt(project.time.split(':')[0]);
-        hourlyStats[hour]++;
+    // Initialize all companies
+    companies.forEach(company => {
+      earningsMap.set(company.id, {
+        companyId: company.id,
+        companyName: company.name,
+        totalEarnings: 0,
+        dailyBreakdown: {},
+        weeklyBreakdown: {},
+        monthlyBreakdown: {},
+        projectCount: 0
       });
+    });
 
-      setHourlyData({
-        labels: Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, '0')}:00`),
-        datasets: [{
-          label: 'Projects Created',
-          data: hourlyStats,
-          backgroundColor: 'rgba(59, 130, 246, 0.6)',
-          borderColor: 'rgba(59, 130, 246, 1)',
-          borderWidth: 1,
-        }]
-      });
+    // Filter projects by selected year
+    const yearProjects = projects.filter(project => {
+      const projectYear = new Date(project.date).getFullYear();
+      return projectYear === selectedYear;
+    });
 
-      // Calculate weekly project creation patterns
-      const weeklyStats = new Array(7).fill(0);
-      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    // Process each project
+    yearProjects.forEach(project => {
+      const companyData = earningsMap.get(project.company);
+      if (!companyData) return;
+
+      const date = new Date(project.date);
+      const dateKey = project.date; // YYYY-MM-DD format
+      const monthKey = date.toLocaleString('default', { month: 'long', year: 'numeric' });
       
-      projects.forEach(project => {
-        const dayOfWeek = new Date(project.date).getDay();
-        weeklyStats[dayOfWeek]++;
-      });
+      // Calculate week of year for weekly breakdown
+      const startOfYear = new Date(date.getFullYear(), 0, 1);
+      const pastDaysOfYear = (date.getTime() - startOfYear.getTime()) / 86400000;
+      const weekNumber = Math.ceil((pastDaysOfYear + startOfYear.getDay() + 1) / 7);
+      const weekKey = `Week ${weekNumber}, ${date.getFullYear()}`;
 
-      setWeeklyData({
-        labels: dayNames,
-        datasets: [{
-          label: 'Projects Created',
-          data: weeklyStats,
-          backgroundColor: [
-            'rgba(239, 68, 68, 0.6)',   // Sunday - Red
-            'rgba(59, 130, 246, 0.6)',  // Monday - Blue
-            'rgba(34, 197, 94, 0.6)',   // Tuesday - Green
-            'rgba(251, 191, 36, 0.6)',  // Wednesday - Yellow
-            'rgba(168, 85, 247, 0.6)',  // Thursday - Purple
-            'rgba(20, 184, 166, 0.6)',  // Friday - Teal
-            'rgba(245, 101, 101, 0.6)', // Saturday - Light Red
-          ],
-          borderColor: [
-            'rgba(239, 68, 68, 1)',
-            'rgba(59, 130, 246, 1)',
-            'rgba(34, 197, 94, 1)',
-            'rgba(251, 191, 36, 1)',
-            'rgba(168, 85, 247, 1)',
-            'rgba(20, 184, 166, 1)',
-            'rgba(245, 101, 101, 1)',
-          ],
-          borderWidth: 1,
-        }]
-      });
+      // Update earnings
+      companyData.totalEarnings += project.price;
+      companyData.projectCount += 1;
+      
+      // Daily breakdown
+      companyData.dailyBreakdown[dateKey] = (companyData.dailyBreakdown[dateKey] || 0) + project.price;
+      
+      // Weekly breakdown
+      companyData.weeklyBreakdown[weekKey] = (companyData.weeklyBreakdown[weekKey] || 0) + project.price;
+      
+      // Monthly breakdown
+      companyData.monthlyBreakdown[monthKey] = (companyData.monthlyBreakdown[monthKey] || 0) + project.price;
+    });
 
-      // Calculate Growth Trends
-      const calculateGrowthTrends = () => {
-        const currentYear = new Date().getFullYear();
-        const currentMonth = new Date().getMonth();
+    return Array.from(earningsMap.values()).filter(company => company.totalEarnings > 0);
+  }, [projects, companies, selectedYear]);
+
+  // Get selected company data
+  const selectedCompanyData = useMemo(() => {
+    if (!selectedCompany) return null;
+    return companyEarningsData.find(company => company.companyId === selectedCompany) || null;
+  }, [companyEarningsData, selectedCompany]);
+
+  // Get time period data for selected company
+  const timePeriodData = useMemo(() => {
+    if (!selectedCompanyData) return { data: {}, labels: [], totals: [] };
+
+    let breakdown: { [key: string]: number } = {};
+    
+    switch (timePeriod) {
+      case 'daily':
+        // For daily view, filter by selected month
+        const monthStart = new Date(selectedYear, selectedMonth - 1, 1);
+        const monthEnd = new Date(selectedYear, selectedMonth, 0);
         
-        // Group projects by year-month
-        const monthlyData = projects.reduce((acc, project) => {
-          const date = new Date(project.date);
-          const yearMonth = `${date.getFullYear()}-${date.getMonth()}`;
-          const key = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`;
-          
-          if (!acc[yearMonth]) {
-            acc[yearMonth] = { count: 0, revenue: 0, key };
-          }
-          acc[yearMonth].count++;
-          acc[yearMonth].revenue += project.price;
-          return acc;
-        }, {} as { [key: string]: { count: number; revenue: number; key: string } });
-
-        // Get last 12 months for comparison
-        const last12Months = [];
-        const last12MonthsLabels = [];
-        const previous12Months = [];
-        
-        for (let i = 11; i >= 0; i--) {
-          const date = new Date(currentYear, currentMonth - i, 1);
-          const yearMonth = `${date.getFullYear()}-${date.getMonth()}`;
-          const prevYearMonth = `${date.getFullYear() - 1}-${date.getMonth()}`;
-          const label = date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-          
-          last12MonthsLabels.push(label);
-          last12Months.push(monthlyData[yearMonth]?.revenue || 0);
-          previous12Months.push(monthlyData[prevYearMonth]?.revenue || 0);
-        }
-
-        setGrowthTrends({
-          labels: last12MonthsLabels,
-          datasets: [
-            {
-              label: 'Current Year Revenue',
-              data: last12Months,
-              borderColor: 'rgba(34, 197, 94, 1)',
-              backgroundColor: 'rgba(34, 197, 94, 0.1)',
-              fill: true,
-              tension: 0.4,
-            },
-            {
-              label: 'Previous Year Revenue',
-              data: previous12Months,
-              borderColor: 'rgba(156, 163, 175, 1)',
-              backgroundColor: 'rgba(156, 163, 175, 0.1)',
-              fill: true,
-              tension: 0.4,
-              borderDash: [5, 5],
-            }
-          ]
-        });
-      };
-
-      // Calculate Demand Prediction
-      const calculateDemandPrediction = () => {
-        const hourlyDemand = new Array(24).fill(0);
-        const weeklyDemand = new Array(7).fill(0);
-        
-        projects.forEach(project => {
-          const date = new Date(project.date);
-          const hour = parseInt(project.time.split(':')[0]);
-          const dayOfWeek = date.getDay();
-          
-          hourlyDemand[hour]++;
-          weeklyDemand[dayOfWeek]++;
-        });
-
-        // Calculate predicted busy periods (above average + 1 standard deviation)
-        const avgHourly = hourlyDemand.reduce((a, b) => a + b, 0) / 24;
-        const stdDevHourly = Math.sqrt(hourlyDemand.reduce((acc, val) => acc + Math.pow(val - avgHourly, 2), 0) / 24);
-        const busyHourThreshold = avgHourly + stdDevHourly;
-
-        const avgWeekly = weeklyDemand.reduce((a, b) => a + b, 0) / 7;
-        const stdDevWeekly = Math.sqrt(weeklyDemand.reduce((acc, val) => acc + Math.pow(val - avgWeekly, 2), 0) / 7);
-        const busyDayThreshold = avgWeekly + stdDevWeekly;
-
-        const busyHours = hourlyDemand.map((demand, hour) => ({
-          hour,
-          demand,
-          isBusy: demand > busyHourThreshold,
-          intensity: Math.min((demand / busyHourThreshold) * 100, 100)
-        }));
-
-        const busyDays = weeklyDemand.map((demand, day) => ({
-          day: dayNames[day],
-          demand,
-          isBusy: demand > busyDayThreshold,
-          intensity: Math.min((demand / busyDayThreshold) * 100, 100)
-        }));
-
-        setDemandPrediction({
-          hourly: busyHours,
-          weekly: busyDays,
-          thresholds: {
-            hourly: busyHourThreshold,
-            weekly: busyDayThreshold
-          }
-        });
-      };
-
-      calculateGrowthTrends();
-      calculateDemandPrediction();
-    } catch (error) {
-      console.error("Error calculating statistics:", error);
-      setChartError(true);
+        breakdown = Object.keys(selectedCompanyData.dailyBreakdown)
+          .filter(dateKey => {
+            const date = new Date(dateKey);
+            return date >= monthStart && date <= monthEnd;
+          })
+          .reduce((acc, dateKey) => {
+            acc[dateKey] = selectedCompanyData.dailyBreakdown[dateKey];
+            return acc;
+          }, {} as { [key: string]: number });
+        break;
+      
+      case 'weekly':
+        breakdown = selectedCompanyData.weeklyBreakdown;
+        break;
+      
+      case 'monthly':
+        breakdown = selectedCompanyData.monthlyBreakdown;
+        break;
     }
-  }, [projects, companies, drivers]);
 
-  // Pie chart options - enhanced with percentage display
-  const pieChartOptions = {
+    const sortedEntries = Object.entries(breakdown).sort((a, b) => {
+      if (timePeriod === 'daily') {
+        return new Date(a[0]).getTime() - new Date(b[0]).getTime();
+      }
+      if (timePeriod === 'weekly') {
+        const weekA = parseInt(a[0].match(/Week (\d+)/)?.[1] || '0');
+        const weekB = parseInt(b[0].match(/Week (\d+)/)?.[1] || '0');
+        return weekA - weekB;
+      }
+      // Monthly
+      return new Date(a[0]).getTime() - new Date(b[0]).getTime();
+    });
+
+    return {
+      data: breakdown,
+      labels: sortedEntries.map(([key]) => key),
+      totals: sortedEntries.map(([, value]) => value)
+    };
+  }, [selectedCompanyData, timePeriod, selectedYear, selectedMonth]);
+
+  // Calculate overview statistics
+  const overviewStats = useMemo(() => {
+    const yearProjects = projects.filter(p => new Date(p.date).getFullYear() === selectedYear);
+    const totalRevenue = yearProjects.reduce((sum, p) => sum + p.price, 0);
+    const totalTrips = yearProjects.length;
+    const totalCompanies = new Set(yearProjects.map(p => p.company)).size;
+    const avgTripValue = totalTrips > 0 ? totalRevenue / totalTrips : 0;
+
+    return {
+      totalRevenue,
+      totalTrips,
+      totalCompanies,
+      avgTripValue
+    };
+  }, [projects, selectedYear]);
+
+  // Chart configuration
+  const chartOptions = {
     responsive: true,
-    maintainAspectRatio: false,
     plugins: {
       legend: {
-        position: 'bottom' as const, // Better for mobile
-        labels: {
-          boxWidth: 12,
-          padding: 10,
-          font: {
-            size: 11
-          }
-        }
+        position: 'top' as const,
       },
-      tooltip: {
-        enabled: true,
-        displayColors: false,
-        callbacks: {
-          label: function(context: any) {
-            const label = context.label || '';
-            const value = context.raw || 0;
-            const total = context.dataset.data.reduce((a: number, b: number) => a + b, 0);
-            const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-            return `${label}: ${value} projects (${percentage}%)`;
-          }
-        }
+      title: {
+        display: true,
+        text: `${selectedCompanyData?.companyName || 'All Companies'} - ${timePeriod.charAt(0).toUpperCase() + timePeriod.slice(1)} Earnings`,
       },
-      datalabels: {
-        display: false
-      }
-    },
-    animation: {
-      duration: 500 // Shorter animations for mobile
-    }
-  };
-
-  // Bar chart options for hourly and weekly data
-  const barChartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: {
-        display: false
-      },
-      tooltip: {
-        enabled: true,
-        displayColors: false,
-        callbacks: {
-          label: function(context: any) {
-            return `${context.parsed.y} projects`;
-          }
-        }
-      }
     },
     scales: {
       y: {
         beginAtZero: true,
         ticks: {
-          stepSize: 1
-        }
-      },
-      x: {
-        ticks: {
-          font: {
-            size: 10
+          callback: function(value: any) {
+            return '€' + value.toFixed(0);
           }
         }
       }
-    },
-    animation: {
-      duration: 500
     }
+  };
+
+  const chartData = {
+    labels: timePeriodData.labels,
+    datasets: [
+      {
+        label: 'Earnings (€)',
+        data: timePeriodData.totals,
+        backgroundColor: selectedCompany 
+          ? 'rgba(34, 197, 94, 0.5)' 
+          : 'rgba(59, 130, 246, 0.5)',
+        borderColor: selectedCompany 
+          ? 'rgba(34, 197, 94, 1)' 
+          : 'rgba(59, 130, 246, 1)',
+        borderWidth: 2,
+      },
+    ],
+  };
+
+  // Company distribution chart
+  const companyDistributionData = {
+    labels: companyEarningsData.map(company => company.companyName),
+    datasets: [
+      {
+        data: companyEarningsData.map(company => company.totalEarnings),
+        backgroundColor: [
+          '#22C55E', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', 
+          '#10B981', '#6366F1', '#F97316', '#EC4899', '#84CC16'
+        ],
+        borderWidth: 2,
+        borderColor: '#ffffff'
+      },
+    ],
+  };
+
+  // Export data as CSV
+  const exportData = () => {
+    if (!selectedCompanyData) {
+      alert('Please select a company to export data');
+      return;
+    }
+
+    let csvContent = '';
+    let filename = '';
+
+    switch (timePeriod) {
+      case 'daily':
+        csvContent = 'Date,Earnings\n';
+        filename = `${selectedCompanyData.companyName.replace(/[^a-zA-Z0-9]/g, '_')}_daily_earnings_${selectedYear}_${selectedMonth.toString().padStart(2, '0')}.csv`;
+        Object.entries(timePeriodData.data).forEach(([date, earnings]) => {
+          csvContent += `"${date}",€${earnings.toFixed(2)}\n`;
+        });
+        break;
+      
+      case 'weekly':
+        csvContent = 'Week,Earnings\n';
+        filename = `${selectedCompanyData.companyName.replace(/[^a-zA-Z0-9]/g, '_')}_weekly_earnings_${selectedYear}.csv`;
+        Object.entries(selectedCompanyData.weeklyBreakdown).forEach(([week, earnings]) => {
+          csvContent += `"${week}",€${earnings.toFixed(2)}\n`;
+        });
+        break;
+      
+      case 'monthly':
+        csvContent = 'Month,Earnings\n';
+        filename = `${selectedCompanyData.companyName.replace(/[^a-zA-Z0-9]/g, '_')}_monthly_earnings_${selectedYear}.csv`;
+        Object.entries(selectedCompanyData.monthlyBreakdown).forEach(([month, earnings]) => {
+          csvContent += `"${month}",€${earnings.toFixed(2)}\n`;
+        });
+        break;
+    }
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    saveAs(blob, filename);
+  };
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshData();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Format label for display
+  const formatLabel = (label: string) => {
+    if (timePeriod === 'daily') {
+      return new Date(label).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric' 
+      });
+    }
+    if (timePeriod === 'weekly') {
+      return label.replace('Week ', 'W');
+    }
+    return label;
   };
 
   return (
     <div className="min-h-screen bg-gray-50 pt-16">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
-        <div className="flex items-center justify-between mb-4 sm:mb-8">
-          <div className="flex items-center space-x-4">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-8">
+          <div className="flex items-center">
             <button
               onClick={() => navigate('/dashboard')}
-              className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
+              className="flex items-center text-gray-600 hover:text-gray-900 mr-4"
             >
-              <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5 mr-2" />
-              <span className="text-sm sm:text-base">Back to Dashboard</span>
+              <ArrowLeft className="w-5 h-5 mr-2" />
+              Back
             </button>
-            <h1 className="text-xl sm:text-3xl font-bold text-gray-900">Statistics</h1>
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">Statistics & Analytics</h1>
+              <p className="text-gray-600 mt-1">
+                Detailed earnings breakdown by company and time period
+              </p>
+            </div>
           </div>
-          
+
           <button
-            onClick={() => navigate('/financial-report')}
-            className="flex items-center px-3 py-2 text-sm font-medium text-green-700 bg-green-100 rounded-md hover:bg-green-200"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
           >
-            <FileText className="w-4 h-4 mr-2" />
-            Financial Report
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            {isRefreshing ? 'Refreshing...' : 'Refresh Data'}
           </button>
         </div>
 
-        {/* Overview Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-6 mb-6 sm:mb-8">
-          <div className="bg-white p-3 sm:p-6 rounded-xl shadow-md">
+        {/* Overview Stats */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          <div className="bg-white rounded-lg shadow-sm p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs sm:text-sm text-gray-500 mb-1">Total Projects</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.total}</h3>
+                <p className="text-sm text-gray-500 mb-1">Total Revenue ({selectedYear})</p>
+                <p className="text-2xl font-bold text-green-600">€{overviewStats.totalRevenue.toFixed(2)}</p>
               </div>
-              <Activity className="w-6 h-6 sm:w-8 sm:h-8 text-blue-500" />
+              <DollarSign className="w-8 h-8 text-green-500" />
             </div>
           </div>
-          
-          <div className="bg-white p-3 sm:p-6 rounded-xl shadow-md">
+
+          <div className="bg-white rounded-lg shadow-sm p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs sm:text-sm text-gray-500 mb-1">Active Projects</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.active}</h3>
+                <p className="text-sm text-gray-500 mb-1">Total Trips</p>
+                <p className="text-2xl font-bold text-blue-600">{overviewStats.totalTrips}</p>
               </div>
-              <Timer className="w-6 h-6 sm:w-8 sm:h-8 text-yellow-500" />
+              <Activity className="w-8 h-8 text-blue-500" />
             </div>
           </div>
-          
-          <div className="bg-white p-3 sm:p-6 rounded-xl shadow-md">
+
+          <div className="bg-white rounded-lg shadow-sm p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs sm:text-sm text-gray-500 mb-1">Completed</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.completed}</h3>
+                <p className="text-sm text-gray-500 mb-1">Active Companies</p>
+                <p className="text-2xl font-bold text-purple-600">{overviewStats.totalCompanies}</p>
               </div>
-              <CheckCircle2 className="w-6 h-6 sm:w-8 sm:h-8 text-green-500" />
+              <Building2 className="w-8 h-8 text-purple-500" />
             </div>
           </div>
-          
-          <div className="bg-white p-3 sm:p-6 rounded-xl shadow-md">
+
+          <div className="bg-white rounded-lg shadow-sm p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs sm:text-sm text-gray-500 mb-1">Total Revenue</p>
-                <h3 className="text-lg sm:text-2xl font-bold">€{statistics.totalRevenue.toFixed(2)}</h3>
+                <p className="text-sm text-gray-500 mb-1">Avg Trip Value</p>
+                <p className="text-2xl font-bold text-orange-600">€{overviewStats.avgTripValue.toFixed(2)}</p>
               </div>
-              <Building2 className="w-6 h-6 sm:w-8 sm:h-8 text-purple-500" />
+              <TrendingUp className="w-8 h-8 text-orange-500" />
             </div>
           </div>
         </div>
 
-        {/* Passenger Statistics */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-6 mb-6 sm:mb-8">
-          <div className="bg-gradient-to-r from-indigo-500 to-indigo-600 p-3 sm:p-6 rounded-xl shadow-md text-white">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs sm:text-sm text-indigo-100 mb-1">Total Passengers</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.totalPassengers}</h3>
-              </div>
-              <Users className="w-6 h-6 sm:w-8 sm:h-8 text-indigo-200" />
+        {/* Controls */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-8">
+          <div className="flex flex-col lg:flex-row lg:items-center gap-4">
+            {/* Company Selection */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                <Building2 className="w-4 h-4 inline mr-1" />
+                Company
+              </label>
+              <select
+                value={selectedCompany}
+                onChange={(e) => setSelectedCompany(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All Companies Overview</option>
+                {companies.map(company => (
+                  <option key={company.id} value={company.id}>
+                    {company.name}
+                  </option>
+                ))}
+              </select>
             </div>
-          </div>
-          
-          <div className="bg-gradient-to-r from-emerald-500 to-emerald-600 p-3 sm:p-6 rounded-xl shadow-md text-white">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs sm:text-sm text-emerald-100 mb-1">Today's Passengers</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.todayPassengers}</h3>
-              </div>
-              <Users className="w-6 h-6 sm:w-8 sm:h-8 text-emerald-200" />
-            </div>
-          </div>
-          
-          <div className="bg-gradient-to-r from-blue-500 to-blue-600 p-3 sm:p-6 rounded-xl shadow-md text-white">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs sm:text-sm text-blue-100 mb-1">Weekly Passengers</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.weeklyPassengers}</h3>
-              </div>
-              <Users className="w-6 h-6 sm:w-8 sm:h-8 text-blue-200" />
-            </div>
-          </div>
-          
-          <div className="bg-gradient-to-r from-purple-500 to-purple-600 p-3 sm:p-6 rounded-xl shadow-md text-white">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs sm:text-sm text-purple-100 mb-1">Monthly Passengers</p>
-                <h3 className="text-lg sm:text-2xl font-bold">{statistics.monthlyPassengers}</h3>
-              </div>
-              <Users className="w-6 h-6 sm:w-8 sm:h-8 text-purple-200" />
-            </div>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mb-8">
-          {/* Daily Earnings */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <DollarSign className="w-5 h-5 mr-2 text-green-500" />
-              Daily Earnings (Last 30 Days)
-            </h3>
-            <div className="space-y-3 sm:space-y-4 max-h-72 overflow-y-auto">
-              {Object.entries(dailyEarnings)
-                .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
-                .slice(0, 10)
-                .map(([date, earnings]) => {
-                  const maxEarnings = Math.max(...Object.values(dailyEarnings));
-                  const percentage = maxEarnings ? (earnings / maxEarnings) * 100 : 0;
-                  
-                  return (
-                    <div key={date} className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <Calendar className="w-4 h-4 text-gray-400 mr-2" />
-                        <span className="text-sm text-gray-600">
-                          {new Date(date).toLocaleDateString('en-US', { 
-                            weekday: 'short', 
-                            month: 'short', 
-                            day: 'numeric' 
-                          })}
-                        </span>
-                      </div>
-                      <div className="flex items-center space-x-3 sm:space-x-4">
-                        <div className="w-20 sm:w-24 h-2 bg-gray-100 rounded-full">
-                          <div
-                            className="h-full bg-green-500 rounded-full"
-                            style={{ width: `${percentage}%` }}
-                          />
-                        </div>
-                        <span className="font-medium text-sm min-w-[60px] text-right">€{earnings.toFixed(0)}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              
-              {Object.keys(dailyEarnings).length === 0 && (
-                <div className="text-center py-4">
-                  <p className="text-gray-500 text-sm">No earnings data available</p>
-                </div>
-              )}
+            {/* Time Period Selection */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                <Clock className="w-4 h-4 inline mr-1" />
+                Time Period
+              </label>
+              <div className="flex bg-gray-100 rounded-lg p-1">
+                {['daily', 'weekly', 'monthly'].map(period => (
+                  <button
+                    key={period}
+                    onClick={() => setTimePeriod(period as 'daily' | 'weekly' | 'monthly')}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition-colors flex-1 ${
+                      timePeriod === period 
+                        ? 'bg-white text-blue-600 shadow-sm' 
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    {period.charAt(0).toUpperCase() + period.slice(1)}
+                  </button>
+                ))}
+              </div>
             </div>
-            
-            {Object.keys(dailyEarnings).length > 10 && (
-              <div className="mt-4 text-center">
-                <button
-                  onClick={() => navigate('/financial-report')}
-                  className="text-sm text-green-600 hover:text-green-700"
+
+            {/* Year Selection */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                <Calendar className="w-4 h-4 inline mr-1" />
+                Year
+              </label>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(Number(e.target.value))}
+                className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {availableYears.map(year => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Month Selection (only for daily view) */}
+            {timePeriod === 'daily' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Month
+                </label>
+                <select
+                  value={selectedMonth}
+                  onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                  className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  View Full Report →
+                  {Array.from({ length: 12 }, (_, i) => (
+                    <option key={i + 1} value={i + 1}>
+                      {new Date(0, i).toLocaleString('default', { month: 'long' })}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Export Button */}
+            {selectedCompany && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2 opacity-0">
+                  Export
+                </label>
+                <button
+                  onClick={exportData}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                >
+                  <Download className="w-4 h-4" />
+                  Export
                 </button>
               </div>
             )}
           </div>
-
-          {/* Company Distribution - Enhanced with modern graphics and percentages */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Building2 className="w-5 h-5 mr-2 text-purple-500" />
-              Companies Distribution
-            </h3>
-
-            <div className="space-y-4">
-              {(() => {
-                const totalProjects = Object.values(companyStats).reduce((sum, count) => sum + count, 0);
-                const sortedCompanies = Object.entries(companyStats)
-                  .sort((a, b) => b[1] - a[1]) // Sort by project count descending
-                  .slice(0, 10); // Show top 10 companies
-                
-                if (sortedCompanies.length === 0) {
-                  return (
-                    <div className="text-center py-8">
-                      <Building2 className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                      <p className="text-gray-500 text-sm">No company data available</p>
-                    </div>
-                  );
-                }
-
-                // Color palette for companies
-                const companyColors = [
-                  'from-purple-500 to-purple-600',
-                  'from-blue-500 to-blue-600',
-                  'from-green-500 to-green-600',
-                  'from-orange-500 to-orange-600',
-                  'from-pink-500 to-pink-600',
-                  'from-teal-500 to-teal-600',
-                  'from-indigo-500 to-indigo-600',
-                  'from-red-500 to-red-600',
-                  'from-yellow-500 to-yellow-600',
-                  'from-cyan-500 to-cyan-600'
-                ];
-
-                return (
-                  <div className="space-y-4">
-                    {/* Summary Stats */}
-                    <div className="grid grid-cols-3 gap-4 mb-6 p-4 bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg border border-purple-100">
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-purple-700">{sortedCompanies.length}</div>
-                        <div className="text-xs text-purple-600">Active Companies</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-blue-700">{totalProjects}</div>
-                        <div className="text-xs text-blue-600">Total Projects</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-green-700">
-                          {sortedCompanies.length > 0 ? Math.round(totalProjects / sortedCompanies.length) : 0}
-                        </div>
-                        <div className="text-xs text-green-600">Avg per Company</div>
-                      </div>
-                    </div>
-
-                    {/* Enhanced Company Bars */}
-                    <div className="space-y-3">
-                      {sortedCompanies.map(([companyId, count], index) => {
-                        const percentage = totalProjects > 0 ? ((count / totalProjects) * 100) : 0;
-                        const colorClass = companyColors[index % companyColors.length];
-                        const isTopCompany = index === 0;
-                        
-                        return (
-                          <div key={companyId} className={`group transition-all duration-300 hover:transform hover:scale-[1.02] ${
-                            isTopCompany ? 'ring-2 ring-purple-200 ring-opacity-50' : ''
-                          }`}>
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center space-x-3">
-                                <div className={`w-3 h-3 rounded-full bg-gradient-to-r ${colorClass} shadow-sm`} />
-                                <div className="flex items-center space-x-2">
-                                  <span className="text-sm font-medium text-gray-700 group-hover:text-gray-900 transition-colors">
-                                    {getCompanyName(companyId)}
-                                  </span>
-                                  {isTopCompany && (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                                      <Star className="w-3 h-3 mr-1" />
-                                      Top
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              
-                              <div className="flex items-center space-x-3">
-                                <div className="text-right">
-                                  <div className="text-sm font-semibold text-gray-900">{count} projects</div>
-                                  <div className="text-xs text-gray-500">{percentage.toFixed(1)}% of total</div>
-                                </div>
-                                <div className={`px-3 py-1 rounded-full text-sm font-bold text-white bg-gradient-to-r ${colorClass} shadow-sm`}>
-                                  {percentage.toFixed(0)}%
-                                </div>
-                              </div>
-                            </div>
-                            
-                            {/* Enhanced Progress Bar */}
-                            <div className="relative w-full bg-gray-100 rounded-full h-3 overflow-hidden shadow-inner">
-                              <div 
-                                className={`h-full bg-gradient-to-r ${colorClass} rounded-full transition-all duration-700 ease-out relative overflow-hidden group-hover:shadow-lg`}
-                                style={{ width: `${percentage}%` }}
-                              >
-                                {/* Shimmer effect */}
-                                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white via-transparent opacity-30 transform -skew-x-12 animate-pulse" />
-                              </div>
-                              
-                              {/* Percentage label on bar for larger percentages */}
-                              {percentage > 15 && (
-                                <div 
-                                  className="absolute top-0 left-2 h-full flex items-center text-xs font-medium text-white"
-                                  style={{ width: `${percentage}%` }}
-                                >
-                                  {percentage.toFixed(1)}%
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* Summary Footer */}
-                    {sortedCompanies.length > 0 && (
-                      <div className="mt-6 pt-4 border-t border-gray-100">
-                        <div className="flex justify-between items-center text-xs text-gray-500">
-                          <span>
-                            Top performer: <span className="font-medium text-purple-600">{getCompanyName(sortedCompanies[0][0])}</span>
-                          </span>
-                          <span>
-                            {sortedCompanies.length} of {Object.keys(companyStats).length} companies shown
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-8">
-          {/* Monthly Revenue Trend */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <TrendingUp className="w-5 h-5 mr-2 text-blue-500" />
-              Monthly Revenue
-            </h3>
-            <div className="space-y-3 sm:space-y-4">
-              {Object.entries(monthlyStats)
-                .sort((a, b) => b[1] - a[1]) // Sort by revenue amount
-                .slice(0, 5)
-                .map(([month, revenue]) => (
-                  <div key={month} className="flex items-center justify-between">
-                    <span className="text-sm text-gray-600">{month}</span>
-                    <div className="flex items-center space-x-3 sm:space-x-4">
-                      <div className="w-24 sm:w-32 h-2 bg-gray-100 rounded-full">
-                        <div
-                          className="h-full bg-blue-500 rounded-full"
-                          style={{ width: `${(revenue / Math.max(...Object.values(monthlyStats))) * 100}%` }}
+        {loading ? (
+          <div className="flex justify-center items-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+          </div>
+        ) : (
+          <div className="space-y-8">
+            {/* Company Overview or Specific Company Analysis */}
+            {!selectedCompany ? (
+              <>
+                {/* All Companies Overview */}
+                <div className="bg-white rounded-lg shadow-sm p-6">
+                  <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center">
+                    <PieChart className="w-6 h-6 mr-2 text-gray-600" />
+                    Company Revenue Distribution ({selectedYear})
+                  </h2>
+                  
+                  {companyEarningsData.length > 0 ? (
+                    <div className="grid lg:grid-cols-2 gap-8">
+                      <div className="h-80">
+                        <Pie 
+                          data={companyDistributionData} 
+                          options={{ 
+                            responsive: true, 
+                            maintainAspectRatio: false,
+                            plugins: {
+                              legend: {
+                                position: 'bottom'
+                              }
+                            }
+                          }} 
                         />
                       </div>
-                      <span className="font-medium text-sm">€{revenue.toFixed(0)}</span>
-                    </div>
-                  </div>
-                ))}
-            </div>
-          </div>
-
-          {/* Weekly Summary */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <TrendingUp className="w-5 h-5 mr-2 text-purple-500" />
-              This Week Summary
-            </h3>
-            <div className="space-y-4">
-              {(() => {
-                const now = new Date();
-                const startOfWeek = new Date(now);
-                startOfWeek.setDate(now.getDate() - now.getDay());
-                
-                const weekProjects = projects.filter(p => {
-                  const projectDate = new Date(p.date);
-                  return projectDate >= startOfWeek && projectDate <= now;
-                });
-                
-                const weekEarnings = weekProjects.reduce((sum, p) => sum + p.price, 0);
-                const avgDailyEarnings = weekEarnings / 7;
-                
-                // Calculate daily earnings for this week
-                const dailyWeekEarnings = weekProjects.reduce((acc, project) => {
-                  const dateKey = project.date;
-                  acc[dateKey] = (acc[dateKey] || 0) + project.price;
-                  return acc;
-                }, {} as { [key: string]: number });
-                
-                // Find the best earning day for this week
-                let bestWeekDay = null;
-                let bestWeekEarnings = 0;
-                for (const [date, earnings] of Object.entries(dailyWeekEarnings)) {
-                  if (earnings > bestWeekEarnings) {
-                    bestWeekEarnings = earnings;
-                    bestWeekDay = date;
-                  }
-                }
-                
-                const bestWeekDayName = bestWeekDay 
-                  ? new Date(bestWeekDay).toLocaleDateString('en-US', { weekday: 'long' })
-                  : 'No data';
-                
-                // Check if this week's best day is a new all-time record
-                const isNewRecord = allTimeBestDay && bestWeekEarnings > allTimeBestDay.earnings;
-                
-                return (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">Total Earnings</span>
-                      <span className="font-semibold text-green-600">€{weekEarnings.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">Projects Completed</span>
-                      <span className="font-semibold">{weekProjects.length}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">Avg. Daily Earnings</span>
-                      <span className="font-semibold text-blue-600">€{avgDailyEarnings.toFixed(2)}</span>
-                    </div>
-                    
-                    {/* All-time Best Day Record */}
-                    {allTimeBestDay && (
-                      <div className="flex justify-between items-center bg-purple-50 p-3 rounded-lg border border-purple-200">
-                        <div className="flex items-center">
-                          <Trophy className="w-4 h-4 text-purple-600 mr-2" />
-                          <span className="text-sm text-gray-600">All-Time Record</span>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-semibold text-purple-700">{allTimeBestDay.dayName}</div>
-                          <div className="text-sm font-medium text-purple-600">€{allTimeBestDay.earnings.toFixed(2)}</div>
-                          <div className="text-xs text-purple-500">
-                            {new Date(allTimeBestDay.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* This Week's Best Day */}
-                    {bestWeekDay && (
-                      <div className={`flex justify-between items-center p-3 rounded-lg border-2 ${
-                        isNewRecord 
-                          ? 'bg-gradient-to-r from-yellow-50 to-orange-50 border-orange-300' 
-                          : 'bg-yellow-50 border-yellow-200'
-                      }`}>
-                        <div className="flex items-center">
-                          {isNewRecord ? (
-                            <div className="flex items-center">
-                              <Star className="w-4 h-4 text-orange-600 mr-1" />
-                              <Trophy className="w-4 h-4 text-orange-600 mr-2" />
+                      
+                      <div className="space-y-3">
+                        <h3 className="font-semibold text-gray-900 mb-4">Company Breakdown</h3>
+                        {companyEarningsData.map((company, index) => {
+                          const percentage = (company.totalEarnings / overviewStats.totalRevenue) * 100;
+                          return (
+                            <div key={company.companyId} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                              <div className="flex items-center gap-3">
+                                <div 
+                                  className="w-4 h-4 rounded-full"
+                                  style={{ 
+                                    backgroundColor: companyDistributionData.datasets[0].backgroundColor[index] 
+                                  }}
+                                />
+                                <div>
+                                  <button
+                                    onClick={() => setSelectedCompany(company.companyId)}
+                                    className="font-medium text-gray-900 hover:text-blue-600"
+                                  >
+                                    {company.companyName}
+                                  </button>
+                                  <p className="text-sm text-gray-500">{company.projectCount} trips</p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="font-medium">€{company.totalEarnings.toFixed(2)}</div>
+                                <div className="text-sm text-gray-500">{percentage.toFixed(1)}%</div>
+                              </div>
                             </div>
-                          ) : (
-                            <Award className="w-4 h-4 text-yellow-600 mr-2" />
-                          )}
-                          <div>
-                            <span className="text-sm text-gray-600">
-                              {isNewRecord ? 'NEW RECORD!' : 'Best Day This Week'}
-                            </span>
-                            {isNewRecord && (
-                              <div className="text-xs text-orange-600 font-medium">All-Time High!</div>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`font-semibold ${isNewRecord ? 'text-orange-700' : 'text-yellow-700'}`}>
-                            {bestWeekDayName}
-                          </div>
-                          <div className={`text-sm font-medium ${isNewRecord ? 'text-orange-600' : 'text-yellow-600'}`}>
-                            €{bestWeekEarnings.toFixed(2)}
-                          </div>
-                          {isNewRecord && (
-                            <div className="text-xs text-orange-500">
-                              Previous: €{allTimeBestDay?.earnings.toFixed(2)}
-                            </div>
-                          )}
-                        </div>
+                          );
+                        })}
                       </div>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-
-          {/* Top Drivers */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Users className="w-5 h-5 mr-2 text-green-500" />
-              Top Drivers by Earnings
-            </h3>
-            <div className="space-y-3 sm:space-y-4">
-              {topDrivers.map(({ id, total }, index) => (
-                <div key={id} className="flex items-center justify-between">
-                  <div className="flex items-center">
-                    <span className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs font-medium text-gray-600 mr-2 sm:mr-3">
-                      {index + 1}
-                    </span>
-                    <span className="text-sm text-gray-700">{getDriverName(id)}</span>
-                  </div>
-                  <span className="font-medium text-sm text-green-600">€{total.toFixed(0)}</span>
+                    </div>
+                  ) : (
+                    <div className="text-center py-12">
+                      <PieChart className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                      <h3 className="text-lg font-medium text-gray-900 mb-2">No data available</h3>
+                      <p className="text-gray-600">No earnings data found for {selectedYear}</p>
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-
-          
-        </div>
-
-        {/* Passenger Analytics Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mt-8">
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Users className="w-5 h-5 mr-2 text-indigo-500" />
-              Daily Passenger Count (Last 30 Days)
-            </h3>
-            <div className="space-y-3 sm:space-y-4 max-h-72 overflow-y-auto">
-              {Object.entries(dailyEarnings)
-                .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
-                .slice(0, 10)
-                .map(([date]) => {
-                  const dayPassengers = projects
-                    .filter(p => p.date === date)
-                    .reduce((sum, p) => sum + (p.passengers || 0), 0);
-                  const maxDailyPassengers = Math.max(...Object.keys(dailyEarnings).map(d => 
-                    projects.filter(p => p.date === d).reduce((sum, p) => sum + (p.passengers || 0), 0)
-                  ));
-                  const percentage = maxDailyPassengers ? (dayPassengers / maxDailyPassengers) * 100 : 0;
-                  
-                  return (
-                    <div key={date} className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <Calendar className="w-4 h-4 text-gray-400 mr-2" />
-                        <span className="text-sm text-gray-600">
-                          {new Date(date).toLocaleDateString('en-US', { 
-                            weekday: 'short', 
-                            month: 'short', 
-                            day: 'numeric' 
-                          })}
-                        </span>
+              </>
+            ) : (
+              <>
+                {/* Selected Company Analysis */}
+                {selectedCompanyData && (
+                  <>
+                    {/* Company Stats Header */}
+                    <div className="bg-white rounded-lg shadow-sm p-6">
+                      <div className="flex items-center justify-between mb-6">
+                        <div>
+                          <h2 className="text-2xl font-bold text-gray-900">
+                            {selectedCompanyData.companyName}
+                          </h2>
+                          <p className="text-gray-600">
+                            {timePeriod.charAt(0).toUpperCase() + timePeriod.slice(1)} earnings analysis for {selectedYear}
+                            {timePeriod === 'daily' && ` - ${new Date(0, selectedMonth - 1).toLocaleString('default', { month: 'long' })}`}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setSelectedCompany('')}
+                          className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                        >
+                          View All Companies
+                        </button>
                       </div>
-                      <div className="flex items-center space-x-3 sm:space-x-4">
-                        <div className="w-20 sm:w-24 h-2 bg-gray-100 rounded-full">
-                          <div
-                            className="h-full bg-indigo-500 rounded-full"
-                            style={{ width: `${percentage}%` }}
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="bg-blue-50 rounded-lg p-4">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm text-blue-600 font-medium">Total Earnings</p>
+                              <p className="text-2xl font-bold text-blue-900">
+                                €{selectedCompanyData.totalEarnings.toFixed(2)}
+                              </p>
+                            </div>
+                            <DollarSign className="w-8 h-8 text-blue-500" />
+                          </div>
+                        </div>
+
+                        <div className="bg-green-50 rounded-lg p-4">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm text-green-600 font-medium">Total Projects</p>
+                              <p className="text-2xl font-bold text-green-900">
+                                {selectedCompanyData.projectCount}
+                              </p>
+                            </div>
+                            <Activity className="w-8 h-8 text-green-500" />
+                          </div>
+                        </div>
+
+                        <div className="bg-purple-50 rounded-lg p-4">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm text-purple-600 font-medium">Avg Per Trip</p>
+                              <p className="text-2xl font-bold text-purple-900">
+                                €{selectedCompanyData.projectCount > 0 
+                                  ? (selectedCompanyData.totalEarnings / selectedCompanyData.projectCount).toFixed(2) 
+                                  : '0.00'}
+                              </p>
+                            </div>
+                            <TrendingUp className="w-8 h-8 text-purple-500" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Earnings Chart */}
+                    <div className="bg-white rounded-lg shadow-sm p-6">
+                      <div className="flex items-center justify-between mb-6">
+                        <h3 className="text-xl font-bold text-gray-900 flex items-center">
+                          <BarChart2 className="w-6 h-6 mr-2" />
+                          {timePeriod.charAt(0).toUpperCase() + timePeriod.slice(1)} Earnings Breakdown
+                        </h3>
+                        
+                        {timePeriod === 'daily' && (
+                          <div className="text-sm text-gray-600">
+                            {new Date(0, selectedMonth - 1).toLocaleString('default', { month: 'long' })} {selectedYear}
+                          </div>
+                        )}
+                      </div>
+                      
+                      {timePeriodData.labels.length > 0 ? (
+                        <div className="h-96">
+                          <Bar 
+                            data={chartData} 
+                            options={{
+                              ...chartOptions,
+                              maintainAspectRatio: false,
+                              scales: {
+                                ...chartOptions.scales,
+                                x: {
+                                  ticks: {
+                                    callback: function(value: any, index: number) {
+                                      return formatLabel(timePeriodData.labels[index]);
+                                    }
+                                  }
+                                }
+                              }
+                            }} 
                           />
                         </div>
-                        <span className="font-medium text-sm min-w-[40px] text-right">{dayPassengers}</span>
-                      </div>
+                      ) : (
+                        <div className="text-center py-12">
+                          <BarChart2 className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                          <h4 className="text-lg font-medium text-gray-900 mb-2">No data for this period</h4>
+                          <p className="text-gray-600">
+                            No earnings data found for {selectedCompanyData.companyName} in this time period
+                          </p>
+                        </div>
+                      )}
                     </div>
-                  );
-                })}
-              
-              {Object.keys(dailyEarnings).length === 0 && (
-                <div className="text-center py-4">
-                  <p className="text-gray-500 text-sm">No passenger data available</p>
-                </div>
-              )}
-            </div>
-          </div>
 
-          {/* Passenger Summary Stats */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <TrendingUp className="w-5 h-5 mr-2 text-indigo-500" />
-              Passenger Analytics
-            </h3>
-            <div className="space-y-4">
-              {(() => {
-                const avgPassengersPerTrip = projects.length > 0 
-                  ? statistics.totalPassengers / projects.length 
-                  : 0;
-                
-                // Find the day with most passengers
-                const dailyPassengerCounts = Object.keys(dailyEarnings).map(date => ({
-                  date,
-                  passengers: projects
-                    .filter(p => p.date === date)
-                    .reduce((sum, p) => sum + (p.passengers || 0), 0)
-                }));
-                
-                const bestPassengerDay = dailyPassengerCounts.reduce((best, current) => 
-                  current.passengers > (best?.passengers || 0) ? current : best
-                , null);
-                
-                // Monthly passenger trend
-                const currentMonth = new Date().getMonth();
-                const currentYear = new Date().getFullYear();
-                const lastMonth = currentMonth === 0 ? 11 : currentMonth - 1;
-                const lastMonthYear = currentMonth === 0 ? currentYear - 1 : currentYear;
-                
-                const currentMonthPassengers = projects
-                  .filter(p => {
-                    const date = new Date(p.date);
-                    return date.getMonth() === currentMonth && date.getFullYear() === currentYear;
-                  })
-                  .reduce((sum, p) => sum + (p.passengers || 0), 0);
-                
-                const lastMonthPassengers = projects
-                  .filter(p => {
-                    const date = new Date(p.date);
-                    return date.getMonth() === lastMonth && date.getFullYear() === lastMonthYear;
-                  })
-                  .reduce((sum, p) => sum + (p.passengers || 0), 0);
-                
-                const monthlyGrowth = lastMonthPassengers > 0 
-                  ? ((currentMonthPassengers - lastMonthPassengers) / lastMonthPassengers * 100)
-                  : 0;
-                
-                return (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">Avg. Passengers per Trip</span>
-                      <span className="font-semibold text-indigo-600">{avgPassengersPerTrip.toFixed(1)}</span>
-                    </div>
-                    
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">Monthly Growth</span>
-                      <span className={`font-semibold ${monthlyGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        {monthlyGrowth >= 0 ? '+' : ''}{monthlyGrowth.toFixed(1)}%
-                      </span>
-                    </div>
-                    
-                    {bestPassengerDay && (
-                      <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
-                        <div className="flex justify-between items-center">
-                          <div className="flex items-center">
-                            <Trophy className="w-4 h-4 text-indigo-600 mr-2" />
-                            <span className="text-sm text-gray-600">Best Passenger Day</span>
-                          </div>
-                          <div className="text-right">
-                            <div className="font-semibold text-indigo-700">{bestPassengerDay.passengers} passengers</div>
-                            <div className="text-xs text-indigo-500">
-                              {new Date(bestPassengerDay.date).toLocaleDateString('en-US', { 
-                                month: 'short', 
-                                day: 'numeric',
-                                weekday: 'short'
+                    {/* Detailed Data Table */}
+                    {timePeriodData.labels.length > 0 && (
+                      <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+                        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+                          <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                            <LineChart className="w-5 h-5 mr-2" />
+                            Detailed {timePeriod.charAt(0).toUpperCase() + timePeriod.slice(1)} Breakdown
+                          </h3>
+                        </div>
+                        
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  {timePeriod === 'daily' ? 'Date' : timePeriod === 'weekly' ? 'Week' : 'Month'}
+                                </th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Earnings
+                                </th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  % of Total
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {timePeriodData.labels.map((label, index) => {
+                                const earnings = timePeriodData.totals[index];
+                                const percentage = (earnings / selectedCompanyData.totalEarnings) * 100;
+                                
+                                return (
+                                  <tr key={label} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                      {timePeriod === 'daily' 
+                                        ? new Date(label).toLocaleDateString('en-US', { 
+                                            weekday: 'short', 
+                                            month: 'short', 
+                                            day: 'numeric' 
+                                          })
+                                        : label
+                                      }
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-green-600 font-semibold">
+                                      €{earnings.toFixed(2)}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                      <div className="flex items-center">
+                                        <div className="flex-1 bg-gray-200 rounded-full h-2 mr-3">
+                                          <div 
+                                            className="bg-blue-500 h-2 rounded-full"
+                                            style={{ width: `${percentage}%` }}
+                                          />
+                                        </div>
+                                        <span>{percentage.toFixed(1)}%</span>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
                               })}
-                            </div>
-                          </div>
+                            </tbody>
+                            <tfoot>
+                              <tr className="bg-gray-100 border-t-2 border-gray-300">
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                  Total
+                                </th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-green-700">
+                                  €{selectedCompanyData.totalEarnings.toFixed(2)}
+                                </th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700">
+                                  100%
+                                </th>
+                              </tr>
+                            </tfoot>
+                          </table>
                         </div>
                       </div>
                     )}
-                    
-                    <div className="grid grid-cols-2 gap-4 mt-4">
-                      <div className="bg-gray-50 p-3 rounded-lg text-center">
-                        <div className="text-lg font-bold text-gray-900">{statistics.todayPassengers}</div>
-                        <div className="text-xs text-gray-500">Today</div>
-                      </div>
-                      <div className="bg-gray-50 p-3 rounded-lg text-center">
-                        <div className="text-lg font-bold text-gray-900">{statistics.weeklyPassengers}</div>
-                        <div className="text-xs text-gray-500">This Week</div>
-                      </div>
-                    </div>
                   </>
-                );
-              })()}
-            </div>
-          </div>
-        </div>
+                )}
 
-        {/* Growth Trends Section */}
-        <div className="grid grid-cols-1 gap-4 sm:gap-8 mt-8">
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <TrendingUp className="w-5 h-5 mr-2 text-green-500" />
-              Revenue Growth Trends - Year over Year Comparison
-            </h3>
-            {growthTrends && !chartError ? (
-              <div className="h-64 sm:h-80">
-                <Pie data={growthTrends} options={{
-                  ...barChartOptions,
-                  scales: {
-                    y: {
-                      beginAtZero: true,
-                      ticks: {
-                        callback: function(value: any) {
-                          return '€' + value.toFixed(0);
-                        }
-                      }
-                    },
-                    x: {
-                      ticks: {
-                        font: {
-                          size: 10
-                        }
-                      }
-                    }
-                  },
-                  plugins: {
-                    legend: {
-                      display: true,
-                      position: 'top' as const
-                    },
-                    tooltip: {
-                      enabled: true,
-                      displayColors: true,
-                      callbacks: {
-                        label: function(context: any) {
-                          return `${context.dataset.label}: €${context.parsed.y.toFixed(2)}`;
-                        }
-                      }
-                    }
-                  }
-                }} />
-              </div>
-            ) : (
-              <div className="h-64 flex items-center justify-center">
-                <p className="text-gray-500 text-sm">No growth trend data available</p>
-              </div>
-            )}
-            <div className="mt-4 grid grid-cols-2 gap-4">
-              {(() => {
-                if (!growthTrends) return null;
-                const currentYearTotal = growthTrends.datasets[0].data.reduce((a: number, b: number) => a + b, 0);
-                const previousYearTotal = growthTrends.datasets[1].data.reduce((a: number, b: number) => a + b, 0);
-                const growth = previousYearTotal > 0 ? ((currentYearTotal - previousYearTotal) / previousYearTotal * 100) : 0;
-                
-                return (
-                  <>
-                    <div className="bg-green-50 p-3 rounded-lg">
-                      <p className="text-sm text-gray-600">Year-over-Year Growth</p>
-                      <p className={`text-lg font-bold ${growth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
-                      </p>
-                    </div>
-                    <div className="bg-blue-50 p-3 rounded-lg">
-                      <p className="text-sm text-gray-600">Revenue Difference</p>
-                      <p className={`text-lg font-bold ${currentYearTotal >= previousYearTotal ? 'text-green-600' : 'text-red-600'}`}>
-                        €{Math.abs(currentYearTotal - previousYearTotal).toFixed(0)}
-                      </p>
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-        </div>
-
-        {/* Geographic Heat Map Section */}
-        <div className="mt-8">
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-4 flex items-center">
-              <MapPin className="w-5 h-5 mr-2 text-purple-500" />
-              Geographic Heat Map - Popular Locations with Earnings
-            </h3>
-            <LocationAnalytics />
-          </div>
-        </div>
-
-        {/* Demand Prediction Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mt-8">
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Clock className="w-5 h-5 mr-2 text-orange-500" />
-              Hourly Demand Prediction
-            </h3>
-            {demandPrediction ? (
-              <div className="space-y-3">
-                <div className="grid grid-cols-12 gap-1">
-                  {demandPrediction.hourly.map((hourData: any, index: number) => (
-                    <div
-                      key={index}
-                      className={`text-center p-2 rounded text-xs font-medium transition-all duration-200 ${
-                        hourData.isBusy 
-                          ? 'bg-red-500 text-white shadow-md' 
-                          : hourData.demand > demandPrediction.thresholds.hourly * 0.7
-                          ? 'bg-yellow-400 text-gray-900'
-                          : 'bg-gray-100 text-gray-600'
-                      }`}
-                      title={`${index}:00 - ${hourData.demand} projects${hourData.isBusy ? ' (BUSY)' : ''}`}
+                {/* No data state for selected company */}
+                {selectedCompany && !selectedCompanyData && (
+                  <div className="bg-white rounded-lg shadow-sm p-12 text-center">
+                    <Building2 className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-900 mb-2">No data found</h3>
+                    <p className="text-gray-600 mb-6">
+                      No earnings data found for the selected company in {selectedYear}
+                    </p>
+                    <button
+                      onClick={() => setSelectedCompany('')}
+                      className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
                     >
-                      {index.toString().padStart(2, '0')}
-                      <div className="text-xs">{hourData.demand}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="text-xs text-gray-500 flex justify-between">
-                  <span>🟥 High Demand</span>
-                  <span>🟨 Medium Demand</span>
-                  <span>⬜ Low Demand</span>
-                </div>
-                <div className="bg-orange-50 p-3 rounded-lg">
-                  <p className="text-sm font-medium text-orange-800">Predicted Busy Hours:</p>
-                  <p className="text-sm text-orange-600">
-                    {demandPrediction.hourly
-                      .filter((h: any) => h.isBusy)
-                      .map((h: any) => `${h.hour.toString().padStart(2, '0')}:00`)
-                      .join(', ') || 'No busy hours predicted'}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="h-32 flex items-center justify-center">
-                <p className="text-gray-500 text-sm">No demand data available</p>
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Calendar className="w-5 h-5 mr-2 text-blue-500" />
-              Weekly Demand Prediction
-            </h3>
-            {demandPrediction ? (
-              <div className="space-y-4">
-                {demandPrediction.weekly.map((dayData: any, index: number) => (
-                  <div
-                    key={index}
-                    className={`flex items-center justify-between p-3 rounded-lg transition-all duration-200 ${
-                      dayData.isBusy 
-                        ? 'bg-red-100 border-2 border-red-300' 
-                        : dayData.demand > demandPrediction.thresholds.weekly * 0.7
-                        ? 'bg-yellow-100 border-2 border-yellow-300'
-                        : 'bg-gray-50 border border-gray-200'
-                    }`}
-                  >
-                    <div className="flex items-center">
-                      <span className={`w-3 h-3 rounded-full mr-3 ${
-                        dayData.isBusy ? 'bg-red-500' : 
-                        dayData.demand > demandPrediction.thresholds.weekly * 0.7 ? 'bg-yellow-500' : 'bg-gray-400'
-                      }`}></span>
-                      <span className="font-medium">{dayData.day}</span>
-                      {dayData.isBusy && (
-                        <span className="ml-2 px-2 py-1 bg-red-500 text-white text-xs rounded-full">BUSY</span>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <div className="font-semibold">{dayData.demand} projects</div>
-                      <div className="text-xs text-gray-500">{dayData.intensity.toFixed(0)}% intensity</div>
-                    </div>
+                      View All Companies
+                    </button>
                   </div>
-                ))}
-                <div className="bg-blue-50 p-3 rounded-lg">
-                  <p className="text-sm font-medium text-blue-800">Busiest Days:</p>
-                  <p className="text-sm text-blue-600">
-                    {demandPrediction.weekly
-                      .filter((d: any) => d.isBusy)
-                      .map((d: any) => d.day)
-                      .join(', ') || 'No particularly busy days identified'}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="h-32 flex items-center justify-center">
-                <p className="text-gray-500 text-sm">No demand data available</p>
-              </div>
+                )}
+              </>
             )}
           </div>
-        </div>
+        )}
 
-        {/* Time Analytics Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mt-8">
-          {/* Hourly Project Creation */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Clock className="w-5 h-5 mr-2 text-blue-500" />
-              Projects by Hour of Day
-            </h3>
-            {hourlyData && !chartError ? (
-              <div className="h-64 sm:h-72">
-                <Bar data={hourlyData} options={barChartOptions} />
+        {/* Quick Navigation */}
+        <div className="mt-8 bg-blue-50 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Navigation</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <button
+              onClick={() => navigate('/financial-report')}
+              className="flex items-center gap-3 p-4 bg-white rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <BarChart2 className="w-6 h-6 text-blue-600" />
+              <div className="text-left">
+                <p className="font-medium text-gray-900">Financial Reports</p>
+                <p className="text-sm text-gray-600">Detailed financial analysis</p>
               </div>
-            ) : (
-              <div className="h-64 flex items-center justify-center">
-                <p className="text-gray-500 text-sm">No hourly data available</p>
-              </div>
-            )}
-            <div className="mt-4 text-xs text-gray-500">
-              <p>Peak hours: {(() => {
-                if (!hourlyData) return 'No data';
-                const maxCount = Math.max(...hourlyData.datasets[0].data);
-                const peakHours = hourlyData.datasets[0].data
-                  .map((count: number, index: number) => count === maxCount ? index : -1)
-                  .filter((hour: number) => hour !== -1)
-                  .map((hour: number) => `${hour.toString().padStart(2, '0')}:00`);
-                return peakHours.join(', ');
-              })()}</p>
-            </div>
-          </div>
+            </button>
 
-          {/* Weekly Project Creation */}
-          <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md">
-            <h3 className="text-lg font-semibold mb-3 sm:mb-6 flex items-center">
-              <Calendar className="w-5 h-5 mr-2 text-purple-500" />
-              Projects by Day of Week
-            </h3>
-            {weeklyData && !chartError ? (
-              <div className="h-64 sm:h-72">
-                <Bar data={weeklyData} options={barChartOptions} />
+            <button
+              onClick={() => navigate('/completed-projects')}
+              className="flex items-center gap-3 p-4 bg-white rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Activity className="w-6 h-6 text-green-600" />
+              <div className="text-left">
+                <p className="font-medium text-gray-900">Completed Projects</p>
+                <p className="text-sm text-gray-600">View project history</p>
               </div>
-            ) : (
-              <div className="h-64 flex items-center justify-center">
-                <p className="text-gray-500 text-sm">No weekly data available</p>
+            </button>
+
+            <button
+              onClick={() => navigate('/settings/payments')}
+              className="flex items-center gap-3 p-4 bg-white rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Users className="w-6 h-6 text-purple-600" />
+              <div className="text-left">
+                <p className="font-medium text-gray-900">Driver Payments</p>
+                <p className="text-sm text-gray-600">Manage driver earnings</p>
               </div>
-            )}
-            <div className="mt-4 text-xs text-gray-500">
-              <p>Busiest day: {(() => {
-                if (!weeklyData) return 'No data';
-                const maxCount = Math.max(...weeklyData.datasets[0].data);
-                const maxIndex = weeklyData.datasets[0].data.indexOf(maxCount);
-                return `${weeklyData.labels[maxIndex]} (${maxCount} projects)`;
-              })()}</p>
-            </div>
+            </button>
           </div>
         </div>
       </div>
